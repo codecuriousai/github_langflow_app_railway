@@ -31,38 +31,84 @@ const CONFIG = {
 };
 
 // Load private key (works both locally and in production)
+// Load private key (Railway-compatible version)
 let privateKey;
 try {
+  console.log('=== Private Key Loading Debug ===');
+  console.log('GITHUB_PRIVATE_KEY exists:', !!process.env.GITHUB_PRIVATE_KEY);
+  console.log('GITHUB_PRIVATE_KEY length:', process.env.GITHUB_PRIVATE_KEY?.length || 0);
+  console.log('GITHUB_PRIVATE_KEY_PATH exists:', !!process.env.GITHUB_PRIVATE_KEY_PATH);
+  
   if (process.env.GITHUB_PRIVATE_KEY) {
-    // Production: use environment variable
-    console.log('Loading private key from environment variable...');
-    privateKey = process.env.GITHUB_PRIVATE_KEY.replace(/\\n/g, '\n');
-  } else if (process.env.GITHUB_PRIVATE_KEY_PATH && fs.existsSync(process.env.GITHUB_PRIVATE_KEY_PATH)) {
-    // Local development: use file path
+    console.log('Loading private key from GITHUB_PRIVATE_KEY environment variable...');
+    
+    // Railway stores multiline variables correctly, but we need to handle potential escaping
+    privateKey = process.env.GITHUB_PRIVATE_KEY;
+    
+    // Only replace \\n with \n if the key contains literal \\n (not actual newlines)
+    if (privateKey.includes('\\n') && !privateKey.includes('\n')) {
+      console.log('Converting \\n to actual newlines...');
+      privateKey = privateKey.replace(/\\n/g, '\n');
+    }
+    
+    // Validate the key format
+    if (!privateKey.includes('-----BEGIN')) {
+      throw new Error('Private key does not appear to be in PEM format');
+    }
+    
+    console.log('Private key loaded from environment variable successfully');
+    console.log('Key starts with:', privateKey.substring(0, 50) + '...');
+    console.log('Key ends with:', '...' + privateKey.substring(privateKey.length - 50));
+    
+  } else if (process.env.GITHUB_PRIVATE_KEY_PATH) {
     console.log('Loading private key from file path...');
+    if (!fs.existsSync(process.env.GITHUB_PRIVATE_KEY_PATH)) {
+      throw new Error(`Private key file not found at: ${process.env.GITHUB_PRIVATE_KEY_PATH}`);
+    }
     privateKey = fs.readFileSync(process.env.GITHUB_PRIVATE_KEY_PATH, 'utf8');
-  } else if (fs.existsSync('./private-key.pem')) {
-    // Fallback: try default file only if it exists
-    console.log('Loading private key from default file...');
-    privateKey = fs.readFileSync('./private-key.pem', 'utf8');
+    console.log('Private key loaded from file path successfully');
+    
   } else {
-    throw new Error('No private key found. Please set GITHUB_PRIVATE_KEY environment variable or provide GITHUB_PRIVATE_KEY_PATH.');
+    // Remove the fallback to ./private-key.pem for Railway deployment
+    throw new Error('GITHUB_PRIVATE_KEY environment variable is required for Railway deployment');
   }
+  
+  // Final validation
+  if (!privateKey || privateKey.trim().length === 0) {
+    throw new Error('Private key is empty after loading');
+  }
+  
+  // Check if key has proper PEM structure
+  const keyLines = privateKey.trim().split('\n');
+  if (keyLines.length < 3) {
+    throw new Error('Private key appears to be malformed (too few lines)');
+  }
+  
+  if (!keyLines[0].includes('-----BEGIN') || !keyLines[keyLines.length - 1].includes('-----END')) {
+    throw new Error('Private key is missing BEGIN/END markers');
+  }
+  
+  console.log('Private key validation passed');
+  console.log('Key has', keyLines.length, 'lines');
+  
 } catch (error) {
-  console.error('Failed to load GitHub private key:', error.message);
+  console.error('❌ Failed to load GitHub private key:', error.message);
+  console.error('');
+  console.error('🔧 Railway Deployment Troubleshooting:');
+  console.error('1. Make sure GITHUB_PRIVATE_KEY is set in Railway environment variables');
+  console.error('2. Copy the ENTIRE private key including -----BEGIN and -----END lines');
+  console.error('3. Railway handles multiline variables automatically - paste as-is');
+  console.error('4. Do NOT escape newlines manually in Railway');
+  console.error('');
+  console.error('Expected format:');
+  console.error('-----BEGIN RSA PRIVATE KEY-----');
+  console.error('MIIEpAIBAAKCAQEA...');
+  console.error('...(key content)...');
+  console.error('-----END RSA PRIVATE KEY-----');
+  console.error('');
+  
   process.exit(1);
 }
-
-// Create GitHub App instance
-console.log('Initializing GitHub App...');
-console.log('App ID:', process.env.GITHUB_APP_ID);
-console.log('Private key length:', privateKey ? privateKey.length : 'NOT SET');
-
-const githubApp = new App({
-  appId: process.env.GITHUB_APP_ID,
-  privateKey: privateKey,
-});
-
 console.log('GitHub App initialized successfully');
 
 // Create webhooks instance
