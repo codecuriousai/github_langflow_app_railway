@@ -32,15 +32,25 @@ const CONFIG = {
 
 // Load private key (works both locally and in production)
 let privateKey;
-if (process.env.GITHUB_PRIVATE_KEY) {
-  // Production: use environment variable
-  privateKey = process.env.GITHUB_PRIVATE_KEY.replace(/\\n/g, '\n');
-} else if (process.env.GITHUB_PRIVATE_KEY_PATH) {
-  // Local development: use file path
-  privateKey = fs.readFileSync(process.env.GITHUB_PRIVATE_KEY_PATH, 'utf8');
-} else {
-  // Fallback: try default file
-  privateKey = fs.readFileSync('./private-key.pem', 'utf8');
+try {
+  if (process.env.GITHUB_PRIVATE_KEY) {
+    // Production: use environment variable
+    console.log('Loading private key from environment variable...');
+    privateKey = process.env.GITHUB_PRIVATE_KEY.replace(/\\n/g, '\n');
+  } else if (process.env.GITHUB_PRIVATE_KEY_PATH && fs.existsSync(process.env.GITHUB_PRIVATE_KEY_PATH)) {
+    // Local development: use file path
+    console.log('Loading private key from file path...');
+    privateKey = fs.readFileSync(process.env.GITHUB_PRIVATE_KEY_PATH, 'utf8');
+  } else if (fs.existsSync('./private-key.pem')) {
+    // Fallback: try default file only if it exists
+    console.log('Loading private key from default file...');
+    privateKey = fs.readFileSync('./private-key.pem', 'utf8');
+  } else {
+    throw new Error('No private key found. Please set GITHUB_PRIVATE_KEY environment variable or provide GITHUB_PRIVATE_KEY_PATH.');
+  }
+} catch (error) {
+  console.error('Failed to load GitHub private key:', error.message);
+  process.exit(1);
 }
 
 // Create GitHub App instance
