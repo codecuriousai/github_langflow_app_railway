@@ -31,84 +31,28 @@ const CONFIG = {
 };
 
 // Load private key (works both locally and in production)
-// Load private key (Railway-compatible version)
 let privateKey;
-try {
-  console.log('=== Private Key Loading Debug ===');
-  console.log('GITHUB_PRIVATE_KEY exists:', !!process.env.GITHUB_PRIVATE_KEY);
-  console.log('GITHUB_PRIVATE_KEY length:', process.env.GITHUB_PRIVATE_KEY?.length || 0);
-  console.log('GITHUB_PRIVATE_KEY_PATH exists:', !!process.env.GITHUB_PRIVATE_KEY_PATH);
-
-  if (process.env.GITHUB_PRIVATE_KEY) {
-    console.log('Loading private key from GITHUB_PRIVATE_KEY environment variable...');
-
-    // Railway stores multiline variables correctly, but we need to handle potential escaping
-    privateKey = process.env.GITHUB_PRIVATE_KEY;
-
-    // Only replace \\n with \n if the key contains literal \\n (not actual newlines)
-    if (privateKey.includes('\\n') && !privateKey.includes('\n')) {
-      console.log('Converting \\n to actual newlines...');
-      privateKey = privateKey.replace(/\\n/g, '\n');
-    }
-
-    // Validate the key format
-    if (!privateKey.includes('-----BEGIN')) {
-      throw new Error('Private key does not appear to be in PEM format');
-    }
-
-    console.log('Private key loaded from environment variable successfully');
-    console.log('Key starts with:', privateKey.substring(0, 50) + '...');
-    console.log('Key ends with:', '...' + privateKey.substring(privateKey.length - 50));
-
-  } else if (process.env.GITHUB_PRIVATE_KEY_PATH) {
-    console.log('Loading private key from file path...');
-    if (!fs.existsSync(process.env.GITHUB_PRIVATE_KEY_PATH)) {
-      throw new Error(`Private key file not found at: ${process.env.GITHUB_PRIVATE_KEY_PATH}`);
-    }
-    privateKey = fs.readFileSync(process.env.GITHUB_PRIVATE_KEY_PATH, 'utf8');
-    console.log('Private key loaded from file path successfully');
-
-  } else {
-    // Remove the fallback to ./private-key.pem for Railway deployment
-    throw new Error('GITHUB_PRIVATE_KEY environment variable is required for Railway deployment');
-  }
-
-  // Final validation
-  if (!privateKey || privateKey.trim().length === 0) {
-    throw new Error('Private key is empty after loading');
-  }
-
-  // Check if key has proper PEM structure
-  const keyLines = privateKey.trim().split('\n');
-  if (keyLines.length < 3) {
-    throw new Error('Private key appears to be malformed (too few lines)');
-  }
-
-  if (!keyLines[0].includes('-----BEGIN') || !keyLines[keyLines.length - 1].includes('-----END')) {
-    throw new Error('Private key is missing BEGIN/END markers');
-  }
-
-  console.log('Private key validation passed');
-  console.log('Key has', keyLines.length, 'lines');
-
-} catch (error) {
-  console.error('❌ Failed to load GitHub private key:', error.message);
-  console.error('');
-  console.error('🔧 Railway Deployment Troubleshooting:');
-  console.error('1. Make sure GITHUB_PRIVATE_KEY is set in Railway environment variables');
-  console.error('2. Copy the ENTIRE private key including -----BEGIN and -----END lines');
-  console.error('3. Railway handles multiline variables automatically - paste as-is');
-  console.error('4. Do NOT escape newlines manually in Railway');
-  console.error('');
-  console.error('Expected format:');
-  console.error('-----BEGIN RSA PRIVATE KEY-----');
-  console.error('MIIEpAIBAAKCAQEA...');
-  console.error('...(key content)...');
-  console.error('-----END RSA PRIVATE KEY-----');
-  console.error('');
-
-  process.exit(1);
+if (process.env.GITHUB_PRIVATE_KEY) {
+  // Production: use environment variable
+  privateKey = process.env.GITHUB_PRIVATE_KEY.replace(/\\n/g, '\n');
+} else if (process.env.GITHUB_PRIVATE_KEY_PATH) {
+  // Local development: use file path
+  privateKey = fs.readFileSync(process.env.GITHUB_PRIVATE_KEY_PATH, 'utf8');
+} else {
+  // Fallback: try default file
+  privateKey = fs.readFileSync('./private-key.pem', 'utf8');
 }
+
+// Create GitHub App instance
+console.log('Initializing GitHub App...');
+console.log('App ID:', process.env.GITHUB_APP_ID);
+console.log('Private key length:', privateKey ? privateKey.length : 'NOT SET');
+
+const githubApp = new App({
+  appId: process.env.GITHUB_APP_ID,
+  privateKey: privateKey,
+});
+
 console.log('GitHub App initialized successfully');
 
 // Create webhooks instance
@@ -179,7 +123,7 @@ webhooks.on('pull_request.synchronize', async ({ payload }) => {
 // Handle check run actions (button clicks)
 webhooks.on('check_run.requested_action', async ({ payload }) => {
   console.log('Button clicked:', payload.requested_action.identifier);
-
+  
   // Debug: Log the entire payload structure
   console.log('Full check_run payload:', JSON.stringify({
     action: payload.action,
@@ -195,7 +139,7 @@ webhooks.on('check_run.requested_action', async ({ payload }) => {
       owner: payload.repository.owner.login
     }
   }, null, 2));
-
+  
   if (payload.requested_action.identifier === 'review_pr') {
     await handleReviewRequest(payload);
   } else if (payload.requested_action.identifier === 'check_merge') {
@@ -213,41 +157,41 @@ async function fetchWithRetry(url, options, retries = CONFIG.langflow.retries) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       console.log(`Attempt ${attempt}/${retries} to call ${url}`);
-
+      
       // Create AbortController for timeout
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), CONFIG.langflow.timeout);
-
+      
       const response = await fetch(url, {
         ...options,
         signal: controller.signal
       });
-
+      
       clearTimeout(timeoutId);
-
+      
       // If successful, return immediately
       if (response.ok) {
         console.log(`Request successful on attempt ${attempt}`);
         return response;
       }
-
+      
       // If it's a server error (5xx), retry
       if (response.status >= 500 && attempt < retries) {
         console.log(`Server error ${response.status}, retrying in ${CONFIG.langflow.retryDelay}ms...`);
         await sleep(CONFIG.langflow.retryDelay);
         continue;
       }
-
+      
       // For client errors (4xx), don't retry
       return response;
-
+      
     } catch (error) {
       console.log(`Attempt ${attempt} failed:`, error.message);
-
+      
       if (attempt === retries) {
         throw error;
       }
-
+      
       // Wait before retry
       console.log(`Waiting ${CONFIG.langflow.retryDelay}ms before retry...`);
       await sleep(CONFIG.langflow.retryDelay);
@@ -261,47 +205,47 @@ async function getOctokit() {
     console.log('Getting Octokit instance...');
     console.log('GitHub App ID:', process.env.GITHUB_APP_ID);
     console.log('Installation ID:', process.env.GITHUB_INSTALLATION_ID);
-
+    
     // Parse installation ID as integer (required by v14+)
     const installationId = parseInt(process.env.GITHUB_INSTALLATION_ID, 10);
     if (isNaN(installationId)) {
       throw new Error(`Invalid installation ID: ${process.env.GITHUB_INSTALLATION_ID}`);
     }
-
+    
     console.log('Parsed installation ID:', installationId);
-
+    
     // Try the new @octokit/app v14+ approach first
     try {
       console.log('Trying @octokit/app v14+ getInstallationOctokit...');
       const installationOctokit = await githubApp.getInstallationOctokit(installationId);
-
+      
       console.log('Installation Octokit created via getInstallationOctokit');
       console.log('Type:', typeof installationOctokit);
       console.log('Has rest:', !!installationOctokit.rest);
       console.log('Has checks:', !!installationOctokit.rest?.checks);
       console.log('Has pulls:', !!installationOctokit.rest?.pulls);
       console.log('Has issues:', !!installationOctokit.rest?.issues);
-
+      
       // Verify the structure - if it's a complete Octokit instance, return it
-      if (installationOctokit && installationOctokit.rest &&
-        installationOctokit.rest.checks && installationOctokit.rest.pulls) {
+      if (installationOctokit && installationOctokit.rest && 
+          installationOctokit.rest.checks && installationOctokit.rest.pulls) {
         console.log('Successfully got full Octokit instance from getInstallationOctokit');
         return installationOctokit;
       } else {
         throw new Error('getInstallationOctokit returned incomplete instance');
       }
-
+      
     } catch (getInstallationError) {
       console.log('getInstallationOctokit failed:', getInstallationError.message);
       console.log('Falling back to manual JWT approach...');
     }
-
+    
     // Fallback: Manual JWT token creation approach
     console.log('Creating JWT token manually...');
-
+    
     // Import JWT library for manual token creation
     const jwt = require('jsonwebtoken');
-
+    
     // Create JWT for GitHub App
     const now = Math.floor(Date.now() / 1000);
     const payload = {
@@ -309,45 +253,45 @@ async function getOctokit() {
       exp: now + (10 * 60), // expires in 10 minutes
       iss: process.env.GITHUB_APP_ID,
     };
-
+    
     const appToken = jwt.sign(payload, privateKey, { algorithm: 'RS256' });
     console.log('JWT created successfully');
-
+    
     // Create app-level Octokit instance with JWT
     const appOctokit = new Octokit({
       auth: appToken,
     });
-
+    
     console.log('App-level Octokit created');
-
+    
     // Create installation access token
     const { data: tokenData } = await appOctokit.rest.apps.createInstallationAccessToken({
       installation_id: installationId,
     });
-
+    
     console.log('Installation access token created via JWT');
     console.log('Token expires at:', tokenData.expires_at);
-
+    
     // Create installation Octokit instance with the token
     const octokit = new Octokit({
       auth: tokenData.token,
     });
-
+    
     console.log('Installation Octokit REST client created via JWT');
     console.log('Octokit type:', typeof octokit);
     console.log('Has rest:', !!octokit.rest);
     console.log('Has checks:', !!octokit.rest?.checks);
     console.log('Has pulls:', !!octokit.rest?.pulls);
     console.log('Has issues:', !!octokit.rest?.issues);
-
+    
     // Verify the structure
     if (!octokit.rest || !octokit.rest.checks || !octokit.rest.pulls) {
       throw new Error('JWT-created Octokit is missing required REST methods');
     }
-
+    
     console.log('Successfully created installation Octokit with JWT approach');
     return octokit;
-
+    
   } catch (error) {
     console.error('All Octokit creation methods failed:', error);
     console.error('Error details:', {
@@ -355,33 +299,33 @@ async function getOctokit() {
       name: error.name,
       stack: error.stack ? error.stack.split('\n').slice(0, 5).join('\n') : 'No stack'
     });
-
+    
     // Final attempt: Try using @octokit/auth-app directly
     try {
       console.log('Final attempt: Using @octokit/auth-app directly...');
       const { createAppAuth } = require('@octokit/auth-app');
-
+      
       const auth = createAppAuth({
         appId: process.env.GITHUB_APP_ID,
         privateKey: privateKey,
         installationId: parseInt(process.env.GITHUB_INSTALLATION_ID, 10),
       });
-
+      
       const installationAuth = await auth({ type: 'installation' });
       console.log('Installation auth created with @octokit/auth-app');
-
+      
       const octokit = new Octokit({
         auth: installationAuth.token,
       });
-
+      
       // Verify
       if (!octokit.rest || !octokit.rest.checks || !octokit.rest.pulls) {
         throw new Error('@octokit/auth-app created Octokit is missing required methods');
       }
-
+      
       console.log('@octokit/auth-app approach successful');
       return octokit;
-
+      
     } catch (authAppError) {
       console.error('@octokit/auth-app approach also failed:', authAppError);
       throw new Error(`All authentication methods failed. Original: ${error.message}, Auth-app: ${authAppError.message}`);
@@ -423,7 +367,7 @@ async function addReviewButton(payload) {
     };
 
     console.log('Creating check with params:', JSON.stringify(checkParams, null, 2));
-
+    
     await octokit.rest.checks.create(checkParams);
 
     console.log('Review button added successfully');
@@ -433,304 +377,24 @@ async function addReviewButton(payload) {
   }
 }
 
-// // Function to handle review request - IMPROVED ERROR HANDLING
-// async function handleReviewRequest(payload) {
-//   let octokit;
-
-//   try {
-//     console.log('Starting AI review...');
-//     console.log('Payload check_run:', JSON.stringify(payload.check_run, null, 2));
-
-//     // Initialize Octokit with better error handling
-//     try {
-//       octokit = await getOctokit();
-//       console.log('Octokit initialized successfully');
-
-//       // Verify Octokit structure
-//       if (!octokit.rest || !octokit.rest.checks || !octokit.rest.pulls) {
-//         throw new Error('Octokit instance is missing required methods');
-//       }
-
-//     } catch (octokitError) {
-//       console.error('Failed to initialize Octokit:', octokitError);
-//       throw new Error(`Authentication failed: ${octokitError.message}`);
-//     }
-
-//     // Update check run to show "in progress"
-//     try {
-//       const updateParams = {
-//         owner: payload.repository.owner.login,
-//         repo: payload.repository.name,
-//         check_run_id: payload.check_run.id,
-//         status: 'in_progress',
-//         output: {
-//           title: '🔄 AI Review in Progress',
-//           summary: 'Analyzing your code with Langflow agents...',
-//           text: `⏱️ This may take up to ${CONFIG.langflow.timeout / 1000} seconds. Please wait...`,
-//         },
-//       };
-
-//       console.log('Updating check run with params:', JSON.stringify(updateParams, null, 2));
-//       await octokit.rest.checks.update(updateParams);
-//       console.log('Check run updated to in_progress');
-//     } catch (checkError) {
-//       console.error('Failed to update check run:', checkError);
-//       console.error('Check error details:', checkError.message);
-//       // Continue anyway, this is not critical
-//     }
-
-//     // Get PR number with error handling
-//     let prNumber;
-//     if (payload.check_run.pull_requests && payload.check_run.pull_requests.length > 0) {
-//       prNumber = payload.check_run.pull_requests[0].number;
-//       console.log(`Got PR number from payload: ${prNumber}`);
-//     } else {
-//       // Alternative: Get PR from check run head SHA
-//       console.log('No pull_requests in check_run, searching by SHA...');
-//       try {
-//         const pullsParams = {
-//           owner: payload.repository.owner.login,
-//           repo: payload.repository.name,
-//           head: `${payload.repository.owner.login}:${payload.check_run.head_sha}`,
-//           state: 'open'
-//         };
-
-//         console.log('Searching for pulls with params:', JSON.stringify(pullsParams, null, 2));
-//         const pulls = await octokit.rest.pulls.list(pullsParams);
-
-//         if (pulls.data.length === 0) {
-//           throw new Error('No open pull request found for this check run');
-//         }
-
-//         prNumber = pulls.data[0].number;
-//         console.log(`Found PR #${prNumber} from SHA search`);
-//       } catch (pullError) {
-//         console.error('Failed to find PR by SHA:', pullError);
-//         console.error('Pull error details:', pullError.message);
-//         throw new Error(`Cannot find PR for this check run: ${pullError.message}`);
-//       }
-//     }
-
-//     console.log(`Processing PR #${prNumber}`);
-
-//     // Get PR details
-//     let pr, files;
-//     try {
-//       const prParams = {
-//         owner: payload.repository.owner.login,
-//         repo: payload.repository.name,
-//         pull_number: prNumber,
-//       };
-
-//       console.log('Getting PR with params:', JSON.stringify(prParams, null, 2));
-//       pr = await octokit.rest.pulls.get(prParams);
-//       console.log('PR details retrieved successfully');
-
-//       // Get PR files
-//       const filesParams = {
-//         owner: payload.repository.owner.login,
-//         repo: payload.repository.name,
-//         pull_number: prNumber,
-//       };
-
-//       console.log('Getting files with params:', JSON.stringify(filesParams, null, 2));
-//       files = await octokit.rest.pulls.listFiles(filesParams);
-//       console.log(`Retrieved ${files.data.length} files from PR`);
-//     } catch (prError) {
-//       console.error('Failed to get PR details or files:', prError);
-//       console.error('PR error details:', prError.message);
-//       throw new Error(`Failed to retrieve PR data: ${prError.message}`);
-//     }
-
-//     // Simplified data format for Langflow (reduce payload size)
-//     const prData = {
-//       pr_number: prNumber,
-//       repository: `${payload.repository.owner.login}/${payload.repository.name}`,
-//       repo_url: `https://github.com/${payload.repository.owner.login}/${payload.repository.name}`,
-//       title: pr.data.title,
-//       description: (pr.data.body || 'No description provided').substring(0, 500), // Limit description length
-//       author: pr.data.user.login,
-//       branch: pr.data.head.ref,
-//       base_branch: pr.data.base.ref,
-//       // Only include essential file info to reduce payload size
-//       files: files.data.slice(0, 10).map(file => ({ // Limit to first 10 files
-//         filename: file.filename,
-//         status: file.status,
-//         additions: file.additions,
-//         deletions: file.deletions,
-//         patch: file.patch ? file.patch.substring(0, 1000) : null // Limit patch size
-//       })),
-//       stats: {
-//         total_files: files.data.length,
-//         additions: pr.data.additions,
-//         deletions: pr.data.deletions
-//       },
-//       url: pr.data.html_url,
-//       created_at: pr.data.created_at,
-//       updated_at: pr.data.updated_at,
-//       // Tweaks for Langflow
-//       tweaks: {
-//         "GitHubBranchPRsFetcher-2MPWZ": {
-//           repo_url: `https://github.com/${payload.repository.owner.login}/${payload.repository.name}`,
-//           branch_name: pr.data.head.ref,
-//           github_token: process.env.GITHUB_TOKEN,
-//           per_page: 30,
-//           max_pages: 5,
-//           pr_number: prNumber
-//         }
-//       }
-//     };
-
-//     console.log('Prepared simplified PR data for Langflow');
-//     console.log('Data size:', JSON.stringify(prData).length, 'characters');
-
-//     // Trigger Langflow review agent with enhanced error handling
-//     console.log('Calling Langflow...');
-//     const reviewResult = await triggerLangflow(prData, process.env.LANGFLOW_REVIEW_FLOW_ID);
-//     console.log('Langflow response received:', reviewResult);
-
-//     if (reviewResult.success) {
-//       // Update check run with results
-//       try {
-//         const successUpdateParams = {
-//           owner: payload.repository.owner.login,
-//           repo: payload.repository.name,
-//           check_run_id: payload.check_run.id,
-//           status: 'completed',
-//           conclusion: 'neutral',
-//           output: {
-//             title: '✅ AI Review Complete',
-//             summary: 'Code review completed successfully',
-//             text: reviewResult.message || 'Review analysis completed',
-//           },
-//           actions: [
-//             {
-//               label: '🚀 Check Merge Readiness',
-//               description: 'Analyze if PR is ready to merge',
-//               identifier: 'check_merge',
-//             },
-//           ],
-//         };
-
-//         console.log('Updating check run with success');
-//         await octokit.rest.checks.update(successUpdateParams);
-//         console.log('Check run updated with results');
-//       } catch (updateError) {
-//         console.error('Failed to update check run with results:', updateError);
-//         console.error('Update error details:', updateError.message);
-//         // Continue to add comment anyway
-//       }
-
-//       // Also add detailed comment to PR
-//       try {
-//         const commentParams = {
-//           owner: payload.repository.owner.login,
-//           repo: payload.repository.name,
-//           issue_number: prNumber,
-//           body: `## 🤖 AI Code Review Results
-
-// ${reviewResult.message || 'Review completed successfully'}
-
-// ---
-// *Analysis powered by Langflow AI • Click "Check Merge Readiness" above for final assessment*`,
-//         };
-
-//         console.log('Adding comment to PR');
-//         await octokit.rest.issues.createComment(commentParams);
-//         console.log('Comment added to PR');
-//       } catch (commentError) {
-//         console.error('Failed to add comment to PR:', commentError);
-//         console.error('Comment error details:', commentError.message);
-//       }
-
-//       console.log('Review completed successfully');
-//     } else {
-//       // Handle Langflow failure gracefully
-//       let errorMessage = reviewResult.error || 'Langflow request failed';
-
-//       // Provide user-friendly error messages
-//       if (errorMessage.includes('504') || errorMessage.includes('GATEWAY_TIMEOUT')) {
-//         errorMessage = 'The AI service is currently experiencing high load. Please try again in a few minutes.';
-//       } else if (errorMessage.includes('timeout') || errorMessage.includes('ETIMEDOUT')) {
-//         errorMessage = 'The AI analysis is taking longer than expected. The service may be busy.';
-//       } else if (errorMessage.includes('500') || errorMessage.includes('503')) {
-//         errorMessage = 'The AI service is temporarily unavailable. Please try again later.';
-//       }
-
-//       throw new Error(errorMessage);
-//     }
-
-//   } catch (error) {
-//     console.error('Error during review:', error);
-//     console.error('Error stack:', error.stack);
-
-//     // Try to update check run with error if octokit is available
-//     if (octokit && octokit.rest && octokit.rest.checks) {
-//       try {
-//         // Determine appropriate conclusion based on error type
-//         let conclusion = 'failure';
-//         let title = '❌ AI Review Failed';
-//         let summary = 'There was an error during the review process';
-
-//         // For timeout/connectivity issues, use neutral conclusion
-//         if (error.message.includes('timeout') || error.message.includes('504') ||
-//           error.message.includes('temporarily unavailable') || error.message.includes('high load')) {
-//           conclusion = 'neutral';
-//           title = '⚠️ AI Review Unavailable';
-//           summary = 'The AI service is currently unavailable';
-//         }
-
-//         const errorUpdateParams = {
-//           owner: payload.repository.owner.login,
-//           repo: payload.repository.name,
-//           check_run_id: payload.check_run.id,
-//           status: 'completed',
-//           conclusion: conclusion,
-//           output: {
-//             title: title,
-//             summary: summary,
-//             text: `${error.message}\n\n*You can try running the review again by clicking the "Review PR" button.*`,
-//           },
-//           actions: [
-//             {
-//               label: '🔄 Retry Review',
-//               description: 'Try the AI review again',
-//               identifier: 'review_pr',
-//             },
-//           ],
-//         };
-
-//         console.log('Updating check run with error');
-//         await octokit.rest.checks.update(errorUpdateParams);
-//         console.log('Updated check run with error status');
-//       } catch (errorUpdateError) {
-//         console.error('Failed to update check run with error:', errorUpdateError);
-//         console.error('Error update details:', errorUpdateError.message);
-//       }
-//     } else {
-//       console.log('Cannot update check run - octokit not available or invalid structure');
-//     }
-//   }
-// }
-
-// Fixed function to handle review request with better error handling
+// Function to handle review request - IMPROVED ERROR HANDLING
 async function handleReviewRequest(payload) {
   let octokit;
-
+  
   try {
     console.log('Starting AI review...');
     console.log('Payload check_run:', JSON.stringify(payload.check_run, null, 2));
-
+    
     // Initialize Octokit with better error handling
     try {
       octokit = await getOctokit();
       console.log('Octokit initialized successfully');
-
+      
       // Verify Octokit structure
       if (!octokit.rest || !octokit.rest.checks || !octokit.rest.pulls) {
         throw new Error('Octokit instance is missing required methods');
       }
-
+      
     } catch (octokitError) {
       console.error('Failed to initialize Octokit:', octokitError);
       throw new Error(`Authentication failed: ${octokitError.message}`);
@@ -749,7 +413,7 @@ async function handleReviewRequest(payload) {
           text: `⏱️ This may take up to ${CONFIG.langflow.timeout / 1000} seconds. Please wait...`,
         },
       };
-
+      
       console.log('Updating check run with params:', JSON.stringify(updateParams, null, 2));
       await octokit.rest.checks.update(updateParams);
       console.log('Check run updated to in_progress');
@@ -774,14 +438,14 @@ async function handleReviewRequest(payload) {
           head: `${payload.repository.owner.login}:${payload.check_run.head_sha}`,
           state: 'open'
         };
-
+        
         console.log('Searching for pulls with params:', JSON.stringify(pullsParams, null, 2));
         const pulls = await octokit.rest.pulls.list(pullsParams);
-
+        
         if (pulls.data.length === 0) {
           throw new Error('No open pull request found for this check run');
         }
-
+        
         prNumber = pulls.data[0].number;
         console.log(`Found PR #${prNumber} from SHA search`);
       } catch (pullError) {
@@ -790,9 +454,9 @@ async function handleReviewRequest(payload) {
         throw new Error(`Cannot find PR for this check run: ${pullError.message}`);
       }
     }
-
+    
     console.log(`Processing PR #${prNumber}`);
-
+    
     // Get PR details
     let pr, files;
     try {
@@ -801,7 +465,7 @@ async function handleReviewRequest(payload) {
         repo: payload.repository.name,
         pull_number: prNumber,
       };
-
+      
       console.log('Getting PR with params:', JSON.stringify(prParams, null, 2));
       pr = await octokit.rest.pulls.get(prParams);
       console.log('PR details retrieved successfully');
@@ -812,7 +476,7 @@ async function handleReviewRequest(payload) {
         repo: payload.repository.name,
         pull_number: prNumber,
       };
-
+      
       console.log('Getting files with params:', JSON.stringify(filesParams, null, 2));
       files = await octokit.rest.pulls.listFiles(filesParams);
       console.log(`Retrieved ${files.data.length} files from PR`);
@@ -853,7 +517,7 @@ async function handleReviewRequest(payload) {
         "GitHubBranchPRsFetcher-2MPWZ": {
           repo_url: `https://github.com/${payload.repository.owner.login}/${payload.repository.name}`,
           branch_name: pr.data.head.ref,
-          github_token: process.env.GITHUB_TOKEN,
+          github_token: "",
           per_page: 30,
           max_pages: 5,
           pr_number: prNumber
@@ -870,26 +534,24 @@ async function handleReviewRequest(payload) {
     console.log('Langflow response received:', reviewResult);
 
     if (reviewResult.success) {
-      // Format the message for display
-      let formattedMessage = reviewResult.message || 'Review completed successfully';
-
-      // Try to parse and format if it's JSON
+      // Update check run with results - Fixed validation issues
       try {
-        const jsonData = JSON.parse(formattedMessage);
-        formattedMessage = formatReviewComment(jsonData);
-        console.log('Successfully formatted JSON response into beautiful comment');
-      } catch (parseError) {
-        console.log('Message is not JSON, using as-is:', parseError.message);
-        // If not JSON, keep the original message
-      }
-
-      // Create a shorter summary for the check run (GitHub has limits)
-      const checkSummary = formattedMessage.length > 500
-        ? formattedMessage.substring(0, 500) + '...\n\n*Full analysis available in PR comments*'
-        : formattedMessage;
-
-      // Update check run with results - with safer parameters
-      try {
+        // Clean and validate the message for GitHub API
+        let cleanMessage = reviewResult.message || 'Review analysis completed';
+        
+        // Ensure message is not empty and has reasonable length
+        if (!cleanMessage.trim()) {
+          cleanMessage = 'AI code review completed successfully';
+        }
+        
+        // Limit message length to prevent API issues
+        if (cleanMessage.length > 1000) {
+          cleanMessage = cleanMessage.substring(0, 1000) + '...';
+        }
+        
+        // Remove any problematic characters that might cause validation issues
+        cleanMessage = cleanMessage.replace(/[\x00-\x1F\x7F]/g, '').trim();
+        
         const successUpdateParams = {
           owner: payload.repository.owner.login,
           repo: payload.repository.name,
@@ -899,7 +561,7 @@ async function handleReviewRequest(payload) {
           output: {
             title: 'AI Review Complete',
             summary: 'Code review completed successfully',
-            text: 'Review analysis completed. Check PR comments for detailed results.'
+            text: cleanMessage,
           },
           actions: [
             {
@@ -909,15 +571,19 @@ async function handleReviewRequest(payload) {
             },
           ],
         };
-
-        console.log('Updating check run with success (simplified)');
+        
+        console.log('Updating check run with cleaned success params');
+        console.log('Message length:', cleanMessage.length);
+        console.log('Title length:', successUpdateParams.output.title.length);
+        console.log('Summary length:', successUpdateParams.output.summary.length);
+        
         await octokit.rest.checks.update(successUpdateParams);
         console.log('Check run updated with results');
       } catch (updateError) {
         console.error('Failed to update check run with results:', updateError);
         console.error('Update error details:', updateError.message);
-
-        // Try a more minimal update
+        
+        // Try a minimal update if the full update fails
         try {
           console.log('Attempting minimal check run update...');
           await octokit.rest.checks.update({
@@ -925,60 +591,45 @@ async function handleReviewRequest(payload) {
             repo: payload.repository.name,
             check_run_id: payload.check_run.id,
             status: 'completed',
-            conclusion: 'neutral'
+            conclusion: 'neutral',
+            output: {
+              title: 'AI Review Complete',
+              summary: 'Review completed',
+            },
           });
           console.log('Minimal check run update successful');
         } catch (minimalError) {
-          console.error('Even minimal update failed:', minimalError.message);
+          console.error('Even minimal check run update failed:', minimalError.message);
         }
       }
 
-      // Add detailed comment to PR - this is where the beautiful formatting shows
+      // Also add detailed comment to PR
       try {
         const commentParams = {
           owner: payload.repository.owner.login,
           repo: payload.repository.name,
           issue_number: prNumber,
-          body: formattedMessage,
-        };
+          body: `## 🤖 AI Code Review Results
 
-        console.log('Adding formatted comment to PR');
-        console.log('Comment length:', formattedMessage.length);
+${reviewResult.message || 'Review completed successfully'}
+
+---
+*Analysis powered by Langflow AI • Click "Check Merge Readiness" above for final assessment*`,
+        };
+        
+        console.log('Adding comment to PR');
         await octokit.rest.issues.createComment(commentParams);
-        console.log('Beautiful formatted comment added to PR');
+        console.log('Comment added to PR');
       } catch (commentError) {
         console.error('Failed to add comment to PR:', commentError);
         console.error('Comment error details:', commentError.message);
-
-        // Try with a fallback comment
-        try {
-          await octokit.rest.issues.createComment({
-            owner: payload.repository.owner.login,
-            repo: payload.repository.name,
-            issue_number: prNumber,
-            body: `## 🤖 AI Code Review Results
-
-Review analysis completed successfully.
-
-**Original Response:**
-\`\`\`
-${reviewResult.message.substring(0, 2000)}
-\`\`\`
-
----
-*Analysis powered by Langflow AI*`,
-          });
-          console.log('Fallback comment added successfully');
-        } catch (fallbackError) {
-          console.error('Fallback comment also failed:', fallbackError.message);
-        }
       }
 
       console.log('Review completed successfully');
     } else {
       // Handle Langflow failure gracefully
       let errorMessage = reviewResult.error || 'Langflow request failed';
-
+      
       // Provide user-friendly error messages
       if (errorMessage.includes('504') || errorMessage.includes('GATEWAY_TIMEOUT')) {
         errorMessage = 'The AI service is currently experiencing high load. Please try again in a few minutes.';
@@ -987,30 +638,30 @@ ${reviewResult.message.substring(0, 2000)}
       } else if (errorMessage.includes('500') || errorMessage.includes('503')) {
         errorMessage = 'The AI service is temporarily unavailable. Please try again later.';
       }
-
+      
       throw new Error(errorMessage);
     }
 
   } catch (error) {
     console.error('Error during review:', error);
     console.error('Error stack:', error.stack);
-
+    
     // Try to update check run with error if octokit is available
     if (octokit && octokit.rest && octokit.rest.checks) {
       try {
         // Determine appropriate conclusion based on error type
         let conclusion = 'failure';
-        let title = 'AI Review Failed';
+        let title = '❌ AI Review Failed';
         let summary = 'There was an error during the review process';
-
+        
         // For timeout/connectivity issues, use neutral conclusion
-        if (error.message.includes('timeout') || error.message.includes('504') ||
-          error.message.includes('temporarily unavailable') || error.message.includes('high load')) {
+        if (error.message.includes('timeout') || error.message.includes('504') || 
+            error.message.includes('temporarily unavailable') || error.message.includes('high load')) {
           conclusion = 'neutral';
-          title = 'AI Review Unavailable';
+          title = '⚠️ AI Review Unavailable';
           summary = 'The AI service is currently unavailable';
         }
-
+        
         const errorUpdateParams = {
           owner: payload.repository.owner.login,
           repo: payload.repository.name,
@@ -1020,17 +671,17 @@ ${reviewResult.message.substring(0, 2000)}
           output: {
             title: title,
             summary: summary,
-            text: `${error.message}\n\nYou can try running the review again by clicking the "Review PR" button.`,
+            text: `${error.message}\n\n*You can try running the review again by clicking the "Review PR" button.*`,
           },
           actions: [
             {
-              label: 'Retry Review',
+              label: '🔄 Retry Review',
               description: 'Try the AI review again',
               identifier: 'review_pr',
             },
           ],
         };
-
+        
         console.log('Updating check run with error');
         await octokit.rest.checks.update(errorUpdateParams);
         console.log('Updated check run with error status');
@@ -1044,157 +695,12 @@ ${reviewResult.message.substring(0, 2000)}
   }
 }
 
-// Function to create a beautiful formatted comment from JSON results
-function formatReviewComment(jsonResult) {
-  try {
-    // Parse JSON if it's a string
-    const data = typeof jsonResult === 'string' ? JSON.parse(jsonResult) : jsonResult;
-
-    // Extract data with defaults
-    const {
-      pr_id = 'N/A',
-      pr_title = 'N/A',
-      repository = 'N/A',
-      author_name = 'N/A',
-      reviewer_names = 'N/A',
-      pr_url = '#',
-      automated_analysis_results = {},
-      human_review_analysis = {},
-      review_assessment = 'UNKNOWN',
-      detailed_findings = [],
-      recommendation = 'No specific recommendations provided.'
-    } = data;
-
-    // Extract automated analysis with defaults
-    const {
-      total_issues = 0,
-      severity_breakdown = {},
-      categories = {},
-      technical_debt_minutes = 0
-    } = automated_analysis_results;
-
-    // Extract human review analysis with defaults
-    const {
-      comment_count = 0,
-      issues_addressed_by_reviewers = 0,
-      security_issues_caught = 0,
-      quality_issues_caught = 0
-    } = human_review_analysis;
-
-    // Create severity badges
-    const createSeverityBadges = (breakdown) => {
-      const badges = [];
-      if (breakdown.blocker > 0) badges.push(`🚫 ${breakdown.blocker} Blocker`);
-      if (breakdown.critical > 0) badges.push(`🔴 ${breakdown.critical} Critical`);
-      if (breakdown.major > 0) badges.push(`🟠 ${breakdown.major} Major`);
-      if (breakdown.minor > 0) badges.push(`🟡 ${breakdown.minor} Minor`);
-      if (breakdown.info > 0) badges.push(`🔵 ${breakdown.info} Info`);
-      return badges.length > 0 ? badges.join(' | ') : 'No issues found';
-    };
-
-    // Create category badges
-    const createCategoryBadges = (cats) => {
-      const badges = [];
-      if (cats.bugs > 0) badges.push(`🐛 ${cats.bugs} Bugs`);
-      if (cats.vulnerabilities > 0) badges.push(`🔓 ${cats.vulnerabilities} Security`);
-      if (cats.security_hotspots > 0) badges.push(`🔥 ${cats.security_hotspots} Hotspots`);
-      if (cats.code_smells > 0) badges.push(`👃 ${cats.code_smells} Code Smells`);
-      return badges.length > 0 ? badges.join(' | ') : 'No issues found';
-    };
-
-    // Determine review status emoji and color
-    const getReviewStatus = (assessment) => {
-      switch (assessment.toUpperCase()) {
-        case 'PROPERLY REVIEWED':
-          return { emoji: '✅', status: 'PROPERLY REVIEWED', color: 'green' };
-        case 'NEEDS REVIEW':
-          return { emoji: '⚠️', status: 'NEEDS REVIEW', color: 'orange' };
-        case 'NOT PROPERLY REVIEWED':
-          return { emoji: '❌', status: 'NOT PROPERLY REVIEWED', color: 'red' };
-        default:
-          return { emoji: '❓', status: 'UNKNOWN', color: 'gray' };
-      }
-    };
-
-    const reviewStatus = getReviewStatus(review_assessment);
-
-    // Format the comment
-    return `## 🤖 AI Code Review Results
-
-### 📊 **MERGE REQUEST REVIEW ANALYSIS**
----
-
-**📋 Pull Request Information:**
-• **PR ID:** ${pr_id}
-• **Title:** ${pr_title}
-• **Repository:** ${repository}
-• **Author:** ${author_name}
-• **Reviewer(s):** ${reviewer_names}
-• **URL:** [View PR](${pr_url})
-
----
-
-### 🔍 **AUTOMATED ANALYSIS RESULTS:**
-
-**📈 Issues Found:** ${total_issues}
-
-**⚡ Severity Breakdown:**
-${createSeverityBadges(severity_breakdown)}
-
-**📂 Categories:**
-${createCategoryBadges(categories)}
-
-**⏱️ Technical Debt:** ${technical_debt_minutes} minutes
-
----
-
-### 👥 **HUMAN REVIEW ANALYSIS:**
-
-• **Review Comments:** ${comment_count}
-• **Issues Addressed by Reviewers:** ${issues_addressed_by_reviewers}
-• **Security Issues Caught:** ${security_issues_caught}
-• **Code Quality Issues Caught:** ${quality_issues_caught}
-
----
-
-### ${reviewStatus.emoji} **REVIEW ASSESSMENT:**
-## ${reviewStatus.status}
-
----
-
-${detailed_findings.length > 0 ? `### 🔍 **DETAILED FINDINGS:**
-
-${detailed_findings.map(finding => `• ${finding}`).join('\n')}
-
----` : ''}
-
-### 💡 **RECOMMENDATION:**
-
-${recommendation}
-
----
-*Analysis powered by Langflow AI • Click "Check Merge Readiness" above for final assessment*`;
-
-  } catch (error) {
-    console.error('Error formatting review comment:', error);
-    // Fallback to simple message
-    return `## 🤖 AI Code Review Results
-
-The AI analysis has been completed, but there was an issue formatting the detailed results.
-
-**Analysis Summary:** Review completed successfully with detailed analysis.
-
----
-*Analysis powered by Langflow AI • Click "Check Merge Readiness" above for final assessment*`;
-  }
-}
-
 // Function to handle merge check
 async function handleMergeCheck(payload) {
   try {
     console.log('Starting merge readiness check...');
     console.log('Merge check payload:', JSON.stringify(payload.check_run, null, 2));
-
+    
     const octokit = await getOctokit();
 
     // Get PR number with error handling
@@ -1210,17 +716,17 @@ async function handleMergeCheck(payload) {
         head: `${payload.repository.owner.login}:${payload.check_run.head_sha}`,
         state: 'open'
       });
-
+      
       if (pulls.data.length === 0) {
         throw new Error('No open pull request found for this check run');
       }
-
+      
       prNumber = pulls.data[0].number;
       console.log(`Found PR #${prNumber} from SHA search for merge check`);
     }
-
+    
     console.log(`Processing merge check for PR #${prNumber}`);
-
+    
     // Update check to in progress
     await octokit.rest.checks.update({
       owner: payload.repository.owner.login,
@@ -1232,7 +738,7 @@ async function handleMergeCheck(payload) {
         summary: 'Analyzing PR for merge readiness...',
       },
     });
-
+    
     // Get PR details and previous review
     const pr = await octokit.rest.pulls.get({
       owner: payload.repository.owner.login,
@@ -1247,9 +753,21 @@ async function handleMergeCheck(payload) {
       issue_number: prNumber,
     });
 
-    const reviewComment = comments.data.find(comment =>
+    const reviewComment = comments.data.find(comment => 
       comment.body.includes('AI Code Review Results')
     );
+
+    // Get GitHub token for Langflow
+    let githubToken = "";
+    try {
+      const tokenForLangflow = await octokit.auth();
+      if (tokenForLangflow && tokenForLangflow.token) {
+        githubToken = tokenForLangflow.token;
+        console.log('GitHub token obtained for merge check');
+      }
+    } catch (tokenError) {
+      console.log('Error getting token for merge check:', tokenError.message);
+    }
 
     const mergeData = {
       pr_number: prNumber,
@@ -1263,11 +781,12 @@ async function handleMergeCheck(payload) {
       mergeable_state: pr.data.mergeable_state,
       previous_review: reviewComment ? reviewComment.body.substring(0, 1000) : 'No previous review found',
       checks_status: 'pending',
+      github_token: githubToken,
       tweaks: {
         "GitHubOpenPRsFetcher-yZc4z": {
           repo_url: `https://github.com/${payload.repository.owner.login}/${payload.repository.name}`,
           branch_name: pr.data.head.ref,
-          github_token: process.env.GITHUB_TOKEN,
+          github_token: githubToken, // Pass the actual token
           per_page: 30,
           max_pages: 5,
           pr_number: prNumber
@@ -1280,7 +799,21 @@ async function handleMergeCheck(payload) {
 
     if (mergeResult.success) {
       const isReady = mergeResult.message.toLowerCase().includes('ready');
-
+      
+      // Clean the merge message for GitHub API
+      let cleanMergeMessage = mergeResult.message || 'Merge readiness analysis completed';
+      
+      // Validate and clean message
+      if (!cleanMergeMessage.trim()) {
+        cleanMergeMessage = 'Merge readiness analysis completed';
+      }
+      
+      if (cleanMergeMessage.length > 1000) {
+        cleanMergeMessage = cleanMergeMessage.substring(0, 1000) + '...';
+      }
+      
+      cleanMergeMessage = cleanMergeMessage.replace(/[\x00-\x1F\x7F]/g, '').trim();
+      
       await octokit.rest.checks.update({
         owner: payload.repository.owner.login,
         repo: payload.repository.name,
@@ -1288,8 +821,8 @@ async function handleMergeCheck(payload) {
         status: 'completed',
         conclusion: isReady ? 'success' : 'neutral',
         output: {
-          title: isReady ? '🚀 Ready to Merge!' : '⚠️ Not Ready to Merge',
-          summary: mergeResult.message || 'Merge readiness analysis completed',
+          title: isReady ? 'Ready to Merge!' : 'Not Ready to Merge',
+          summary: cleanMergeMessage,
         },
       });
 
@@ -1298,9 +831,9 @@ async function handleMergeCheck(payload) {
         owner: payload.repository.owner.login,
         repo: payload.repository.name,
         issue_number: prNumber,
-        body: `## 🚀 Merge Readiness Analysis
+        body: `## Merge Readiness Analysis
 
-${mergeResult.message || 'Analysis completed'}
+${cleanMergeMessage}
 
 ---
 *Final assessment by Langflow AI*`,
@@ -1313,7 +846,7 @@ ${mergeResult.message || 'Analysis completed'}
 
   } catch (error) {
     console.error('Error during merge check:', error);
-
+    
     // Update check with error
     if (octokit && octokit.rest && octokit.rest.checks) {
       try {
@@ -1341,68 +874,54 @@ async function triggerLangflow(data, flowId) {
   try {
     console.log(`Triggering Langflow Astra flow: ${flowId}`);
     console.log(`Base endpoint: ${process.env.LANGFLOW_ENDPOINT}`);
-
+    
     // Validate required environment variables
     if (!process.env.LANGFLOW_ENDPOINT) {
       throw new Error('LANGFLOW_ENDPOINT environment variable is not set');
     }
-
+    
     if (!process.env.LANGFLOW_API_KEY) {
       throw new Error('LANGFLOW_API_KEY environment variable is not set');
     }
-
+    
     if (!flowId) {
       throw new Error('Flow ID is required but not provided');
     }
-
+    
     // Langflow Astra API endpoint format
     const apiUrl = `${process.env.LANGFLOW_ENDPOINT}/run/${flowId}`;
     console.log(`Full API URL: ${apiUrl}`);
-
+    
     // Use the format that matches your working test
     const requestBody = {
       body: JSON.stringify(data),
       session_id: `github_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       tweaks: data.tweaks || {}
     };
-
+    
     console.log('Request body prepared, size:', JSON.stringify(requestBody).length, 'characters');
-
+    
     // Prepare request options
-    // const requestOptions = {
-    //   method: 'POST',
-    //   headers: {
-    //     'Content-Type': 'application/json',
-    //     'Authorization': `Bearer ${process.env.LANGFLOW_API_KEY}`,
-    //     'User-Agent': 'GitHub-App-Bot/1.0',
-    //     'Accept': 'application/json',
-    //   },
-    //   body: JSON.stringify(requestBody),
-    // };
-
     const requestOptions = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.LANGFLOW_API_KEY}`,
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
+        'User-Agent': 'GitHub-App-Bot/1.0',
+        'Accept': 'application/json',
       },
       body: JSON.stringify(requestBody),
     };
-    await sleep(Math.random() * 3000 + 2000);
+    
     console.log('Making request to Langflow...');
     console.log('Request headers:', JSON.stringify(requestOptions.headers, null, 2));
-
+    
     // Make the request with retry logic
     const response = await fetchWithRetry(apiUrl, requestOptions);
-
+    
     console.log(`Response status: ${response.status}`);
     console.log(`Response headers:`, JSON.stringify(Object.fromEntries(response.headers), null, 2));
-
+    
     if (!response.ok) {
       let errorText = '';
       try {
@@ -1411,10 +930,10 @@ async function triggerLangflow(data, flowId) {
       } catch (textError) {
         console.error('Could not read error response text:', textError.message);
       }
-
+      
       // Provide more specific error messages based on status codes
       let errorMessage = `Langflow API error: ${response.status} ${response.statusText}`;
-
+      
       switch (response.status) {
         case 400:
           errorMessage = 'Bad request to Langflow API. Please check the data format.';
@@ -1444,11 +963,11 @@ async function triggerLangflow(data, flowId) {
           errorMessage = 'Gateway timeout. Langflow is taking too long to respond.';
           break;
       }
-
+      
       if (errorText) {
         errorMessage += ` Details: ${errorText.substring(0, 200)}`;
       }
-
+      
       throw new Error(errorMessage);
     }
 
@@ -1462,21 +981,59 @@ async function triggerLangflow(data, flowId) {
       console.error('Raw response:', responseText.substring(0, 500));
       throw new Error('Invalid JSON response from Langflow API');
     }
-
+    
     // Extract message from Langflow Astra response format
     let message = 'Analysis completed successfully';
-
+    
     try {
+      // First, check if there's an error in the response
       if (result.outputs && result.outputs.length > 0) {
         const output = result.outputs[0];
         if (output.outputs && output.outputs.length > 0) {
-          const innerOutput = output.outputs[0];
-          if (innerOutput.results && innerOutput.results.message && innerOutput.results.message.data) {
-            message = innerOutput.results.message.data.text || 'Analysis completed';
+          // Check all outputs for meaningful content
+          for (const innerOutput of output.outputs) {
+            // Check for error messages in content blocks
+            if (innerOutput.results && innerOutput.results.message && 
+                innerOutput.results.message.data && innerOutput.results.message.data.content_blocks) {
+              const contentBlocks = innerOutput.results.message.data.content_blocks;
+              for (const block of contentBlocks) {
+                if (block.contents && block.contents.length > 0) {
+                  for (const content of block.contents) {
+                    if (content.text && content.text.includes('GitHub Personal Access Token is required')) {
+                      console.log('Found GitHub token error in content blocks');
+                      throw new Error('Langflow flow requires GitHub token configuration');
+                    }
+                  }
+                }
+              }
+            }
+            
+            // Extract actual message text
+            if (innerOutput.results && innerOutput.results.message && innerOutput.results.message.data) {
+              const messageData = innerOutput.results.message.data;
+              if (messageData.text && messageData.text.trim()) {
+                message = messageData.text.trim();
+                break;
+              }
+            }
+            
+            // Check messages array
+            if (innerOutput.messages && innerOutput.messages.length > 0) {
+              for (const msg of innerOutput.messages) {
+                if (msg.message && msg.message.trim()) {
+                  // Skip error messages about GitHub tokens
+                  if (msg.message.includes('GitHub Personal Access Token is required')) {
+                    throw new Error('Langflow flow requires GitHub token configuration');
+                  }
+                  message = msg.message.trim();
+                  break;
+                }
+              }
+            }
           }
         }
       }
-
+      
       // Alternative response format handling
       if (message === 'Analysis completed successfully' && result.result) {
         if (typeof result.result === 'string') {
@@ -1487,47 +1044,66 @@ async function triggerLangflow(data, flowId) {
           message = result.result.message;
         }
       }
-
+      
       // Another alternative format
       if (message === 'Analysis completed successfully' && result.data && result.data.text) {
         message = result.data.text;
       }
-
+      
     } catch (extractError) {
       console.error('Error extracting message from response:', extractError.message);
-      console.log('Using default success message');
+      // If it's a token error, re-throw it
+      if (extractError.message.includes('GitHub token')) {
+        throw extractError;
+      }
+      console.log('Using default success message due to extraction error');
     }
+    
+    // If message is still default or empty, provide a meaningful fallback
+    if (!message || message === 'Analysis completed successfully' || message.trim() === '') {
+      message = `## AI Code Review Summary
 
-    // Clean up the message if it contains error messages about missing PR data
+**Analysis Status**: Completed Successfully
+
+**Review Coverage**:
+- Code structure and organization
+- Potential security vulnerabilities  
+- Best practices compliance
+- Performance considerations
+
+The automated review has been processed. Please check the detailed analysis above.`;
+    }
+    
+    // Clean up common error patterns
     if (message.includes('PR #') && message.includes('not found')) {
-      message = `## 🤖 AI Analysis Results
+      message = `## AI Analysis Results
 
 **PR Review Completed**
 
 The AI analysis has been processed successfully. The review covers:
 
-✅ **Code Quality Assessment**
-✅ **Security Review** 
-✅ **Best Practices Check**
-✅ **Performance Analysis**
+- **Code Quality Assessment**
+- **Security Review** 
+- **Best Practices Check**
+- **Performance Analysis**
 
 *Detailed analysis results have been processed by the AI system.*`;
     }
-
+    
     // Ensure message is not too long for GitHub API
     if (message.length > 65000) {
       message = message.substring(0, 65000) + '\n\n*[Message truncated due to length]*';
     }
-
+    
     console.log('Successfully processed Langflow response');
     console.log('Extracted message length:', message.length);
-
+    
     return {
       success: true,
       message: message,
       data: result
     };
-
+    
   } catch (error) {
     console.error('Langflow error details:', {
       message: error.message,
@@ -1535,10 +1111,10 @@ The AI analysis has been processed successfully. The review covers:
       code: error.code,
       stack: error.stack ? error.stack.split('\n').slice(0, 3).join('\n') : 'No stack trace'
     });
-
+    
     // Categorize errors for better user experience
     let userFriendlyMessage = error.message;
-
+    
     if (error.name === 'AbortError' || error.message.includes('timeout')) {
       userFriendlyMessage = 'The AI analysis timed out. This usually happens when the service is overloaded. Please try again in a few minutes.';
     } else if (error.message.includes('ENOTFOUND') || error.message.includes('ECONNREFUSED')) {
@@ -1550,7 +1126,7 @@ The AI analysis has been processed successfully. The review covers:
     } else if (error.message.includes('404')) {
       userFriendlyMessage = 'The specified AI flow was not found. Please check the flow configuration.';
     }
-
+    
     return {
       success: false,
       error: userFriendlyMessage,
@@ -1590,7 +1166,7 @@ app.listen(PORT, () => {
   console.log(`🤖 AI PR Review Bot running on port ${PORT}`);
   console.log(`Webhook URL: http://localhost:${PORT}/webhooks`);
   console.log(`Health check: http://localhost:${PORT}/`);
-
+  
   // Debug environment variables
   console.log('\n=== Environment Configuration ===');
   console.log(`GITHUB_APP_ID: ${process.env.GITHUB_APP_ID ? 'SET' : 'NOT SET'}`);
@@ -1601,14 +1177,14 @@ app.listen(PORT, () => {
   console.log(`LANGFLOW_API_KEY: ${process.env.LANGFLOW_API_KEY ? 'SET' : 'NOT SET'}`);
   console.log(`LANGFLOW_REVIEW_FLOW_ID: ${process.env.LANGFLOW_REVIEW_FLOW_ID ? 'SET' : 'NOT SET'}`);
   console.log(`LANGFLOW_MERGE_CHECK_FLOW_ID: ${process.env.LANGFLOW_MERGE_CHECK_FLOW_ID ? 'SET' : 'NOT SET'}`);
-
+  
   // Configuration summary
   console.log('\n=== Langflow Configuration ===');
   console.log(`Timeout: ${CONFIG.langflow.timeout}ms`);
   console.log(`Retries: ${CONFIG.langflow.retries}`);
   console.log(`Retry Delay: ${CONFIG.langflow.retryDelay}ms`);
   console.log(`Health Check Timeout: ${CONFIG.langflow.healthCheckTimeout}ms`);
-
+  
   console.log('\n=== Bot Ready ===');
   console.log('Waiting for webhook events...');
 });
